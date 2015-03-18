@@ -9,6 +9,7 @@ import (
     "reflect"
 )
 
+const SOCKET = "/socks/rrdcached.sock"
 const RRD_FILE = "/tmp/test.rrd"
 
 
@@ -94,7 +95,7 @@ func verifyStatsChange(t *testing.T, stats_pre *Stats, stats_post *Stats, stats_
 // Tests
 
 func TestUpdate(t *testing.T) {
-    rrdcached := NewRrdcached( "unix", "/socks/rrdcached.sock" )
+    rrdcached := NewRrdcached( "unix", SOCKET )
     rrdcached.Connect()
     rrdcached.FlushAll()
     stats_pre := rrdcached.GetStats()
@@ -115,7 +116,7 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestPending(t *testing.T) {
-    rrdcached := NewRrdcached( "unix", "/socks/rrdcached.sock" )
+    rrdcached := NewRrdcached( "unix", SOCKET )
     rrdcached.Connect()
     rrdcached.FlushAll()
     stats_pre := rrdcached.GetStats()
@@ -138,7 +139,7 @@ func TestPending(t *testing.T) {
 }
 
 func TestFlush(t *testing.T) {
-    rrdcached := NewRrdcached( "unix", "/socks/rrdcached.sock" )
+    rrdcached := NewRrdcached( "unix", SOCKET )
     rrdcached.Connect()
     rrdcached.FlushAll()
     stats_pre := rrdcached.GetStats()
@@ -162,7 +163,7 @@ func TestFlush(t *testing.T) {
 }
 
 func TestFlushAll(t *testing.T) {
-    rrdcached := NewRrdcached( "unix", "/socks/rrdcached.sock" )
+    rrdcached := NewRrdcached( "unix", SOCKET )
     rrdcached.Connect()
     rrdcached.FlushAll()
     stats_pre := rrdcached.GetStats()
@@ -186,7 +187,7 @@ func TestFlushAll(t *testing.T) {
 }
 
 func TestForget(t *testing.T) {
-    rrdcached := NewRrdcached( "unix", "/socks/rrdcached.sock" )
+    rrdcached := NewRrdcached( "unix", SOCKET )
     rrdcached.Connect()
     rrdcached.FlushAll()
     stats_pre := rrdcached.GetStats()
