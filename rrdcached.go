@@ -147,8 +147,11 @@ func checkResponse(conn net.Conn) *Response {
 }
 
 func NowString() string {
+	// rrdcached doesn't grok milliseconds before v1.4.5:
+	// https://lists.oetiker.ch/pipermail/rrd-users/2011-May/017816.html
+	precision := 0 // 3 is supported in newer versions
 	ms := float64(time.Now().UnixNano()) / float64(time.Second)
-	return strconv.FormatFloat(ms, 'f', 3, 64)
+	return strconv.FormatFloat(ms, 'f', precision, 64)
 }
 
 // ----------------------------------------------------------
