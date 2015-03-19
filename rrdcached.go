@@ -78,14 +78,39 @@ func parseStats(data string) *Stats {
 // http://stackoverflow.com/questions/2886719/unix-sockets-in-go
 // -------------------------------------------------------------
 
-func readOnce(r io.Reader) string {
-	buf := make([]byte, 1024)
+func readData(r io.Reader) string {
+	data := ""
 
-	n, err := r.Read(buf[:])
-	if err != nil {
-		panic(err)
+	for {
+		buf := make([]byte, 1024)
+		n, err := r.Read(buf[:])
+		if err != nil {
+			panic(err)
+		}
+		data += string(buf[0:n])
+
+		// If response starts with a positive number,
+		// that indicates how many additional lines are expected.
+		// Otherwise, go ahead and break.
+		check := strings.Split(data, " ")
+		if len(check) > 1 {
+			status, err := strconv.ParseUint(check[0], 10, 64)
+
+			// Not a number.
+			if err != nil {
+				break
+			}
+			// Not a positive number.
+			if status <= 0 {
+				break
+			}
+			// More lines are expected, do we have them all yet?
+			lines := strings.Split(data, "\n")
+			if uint64(len(lines)) >= (status + 1) {
+				break
+			}
+		}
 	}
-	data := string(buf[0:n])
 
 	return data
 }
@@ -106,7 +131,7 @@ type Response struct {
 }
 
 func checkResponse(conn net.Conn) *Response {
-	data := readOnce(conn)
+	data := readData(conn)
 	data = strings.TrimSpace(data)
 	fmt.Println(data)
 
@@ -132,7 +157,7 @@ func (r *Rrdcached) GetStats() *Stats {
 	conn := r.Connect()
 	defer conn.Close()
 	writeData(conn, "STATS\n")
-	data := readOnce(conn)
+	data := readData(conn)
 	return parseStats(data)
 }
 
