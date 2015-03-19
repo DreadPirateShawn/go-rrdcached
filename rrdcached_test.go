@@ -2,15 +2,69 @@ package rrdcached
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/lestrrat/go-tcptest"
 )
 
-const SOCKET = "/socks/rrdcached.sock"
-const RRD_FILE = "/tmp/test.rrd"
+const TEST_DIR = "/tmp"
+const SOCKET = TEST_DIR + "/go-rrdcached-test.sock"
+const RRD_FILE = TEST_DIR + "/go-rrdcached-test.rrd"
+
+func TestMain(m *testing.M) {
+	// Note: Sub-function is here to allow defer usage, since os.Exit() bypasses defer.
+	status_code := startDaemonRunTestsStopDaemon(m)
+
+	// Exit with status code
+	os.Exit(status_code)
+}
+
+func startDaemonRunTestsStopDaemon(m *testing.M) int {
+	// Setup
+	var cmd *exec.Cmd
+	daemon := func(port int) {
+		/*
+			Note: '-g' flag is crucial ("run in foreground"), otherwise rrdcached will run as a forked child process,
+			  and the parent (cmd) will exit and orphan the rrdcached process, leaving no (sane) way to tear it down.
+		*/
+		cmd = exec.Command("rrdcached", "-g",
+			"-p", fmt.Sprintf("%v/go-rrdached-test-%d.pid", TEST_DIR, port),
+			"-B", "-b", TEST_DIR,
+			"-l", SOCKET,
+			"-l", fmt.Sprintf("0.0.0.0:%d", port))
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+		cmd.Run()
+	}
+
+	server, err := tcptest.Start(daemon, 30*time.Second)
+	if err != nil {
+		fmt.Println("Failed to start rrdcached:", err)
+		panic(err)
+	}
+	fmt.Printf("rrdcached started on port %d", server.Port())
+
+	// Teardown (deferred)
+	defer func() {
+		if cmd != nil && cmd.Process != nil {
+			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				fmt.Println("SIGTERM failed:", err)
+			}
+			server.Wait()
+		}
+	}()
+
+	// Run tests
+	return m.Run()
+}
 
 // ------------------------------------------
 // Helper Fixtures
