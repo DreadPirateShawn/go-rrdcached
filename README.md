@@ -59,7 +59,7 @@ tail /var/log/syslog
 TODO: Shouldn't tests be runnable without doing this?
 
 ```
-rrdtool create /tmp/test.rrd \
+rrdtool create /tmp/go-rrdcached-test.rrd \
 --start N --step 300 \
 DS:test1:GAUGE:600:0:100 \
 DS:test2:GAUGE:600:0:100 \
