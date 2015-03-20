@@ -164,6 +164,31 @@ func (r *Rrdcached) GetStats() *Stats {
 	return parseStats(data)
 }
 
+func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite bool, ds []string, rra []string) *Response {
+	conn := r.Connect()
+	defer conn.Close()
+
+	var params []string
+	if start >= 0 {
+		params = append(params, string(start))
+	}
+	if step >= 0 {
+		params = append(params, string(step))
+	}
+	if !overwrite {
+		params = append(params, "-O")
+	}
+	if ds != nil {
+		params = append(params, strings.Join(ds, " "))
+	}
+	if rra != nil {
+		params = append(params, strings.Join(rra, " "))
+	}
+
+	writeData(conn, "CREATE "+filename+" "+strings.Join(params, " ")+"\n")
+	return checkResponse(conn)
+}
+
 func (r *Rrdcached) Update(filename string, values ...string) *Response {
 	conn := r.Connect()
 	defer conn.Close()

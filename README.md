@@ -10,7 +10,7 @@ go get github.com/dreadpirateshawn/rrdcached
 
 ## Setup
 
-rrdcached was developed against RRDCacheD 1.4.7, likely works on 1.4.x in general.
+rrdcached was developed against RRDCacheD 1.5.0-rc2 and expects CREATE support.
 
 ```
 sudo apt-get install rrdcached rrdtool

@@ -18,22 +18,29 @@ const TEST_DIR = "/tmp"
 const SOCKET = TEST_DIR + "/go-rrdcached-test.sock"
 const RRD_FILE = TEST_DIR + "/go-rrdcached-test.rrd"
 
-func TestMain(m *testing.M) {
-	// Note: Sub-function is here to allow defer usage, since os.Exit() bypasses defer.
-	status_code := startDaemonRunTestsStopDaemon(m)
+var cmd *exec.Cmd
+var rrdcached *Rrdcached
+var daemon *tcptest.TCPTest
 
-	// Exit with status code
-	os.Exit(status_code)
+// ------------------------------------------
+// Setup & Teardown
+
+func testSetup(t *testing.T) {
+	os.Remove(RRD_FILE) // Remove existing RRD file
+	daemonStart()       // Start rrdcached daemon
+	daemonConnect()     // Connect to rrdcached
+	createFreshRRD(t)   // Create fresh RRD
 }
 
-func startDaemonRunTestsStopDaemon(m *testing.M) int {
-	// Setup
-	var cmd *exec.Cmd
-	daemon := func(port int) {
-		/*
-			Note: '-g' flag is crucial ("run in foreground"), otherwise rrdcached will run as a forked child process,
-			  and the parent (cmd) will exit and orphan the rrdcached process, leaving no (sane) way to tear it down.
-		*/
+func testTeardown() {
+	rrdcached.Quit() // Not strictly necessary, but it feels nice to call this.
+	daemonStop()     // Stop rrdcached daemon
+}
+
+func daemonStart() {
+	// Note: '-g' flag is crucial ("run in foreground"), otherwise rrdcached will run as a forked child process,
+	// and the parent (cmd) will exit and orphan the rrdcached process, leaving no (sane) way to tear it down.
+	cmd_wrapper := func(port int) {
 		cmd = exec.Command("rrdcached", "-g",
 			"-p", fmt.Sprintf("%v/go-rrdached-test-%d.pid", TEST_DIR, port),
 			"-B", "-b", TEST_DIR,
@@ -45,25 +52,35 @@ func startDaemonRunTestsStopDaemon(m *testing.M) int {
 		cmd.Run()
 	}
 
-	server, err := tcptest.Start(daemon, 30*time.Second)
+	// daemon is a global, but err is new. Using "daemon, err :=" creates a local shadowed variable "daemon". Thus the tmp var.
+	daemon_tmp, err := tcptest.Start(cmd_wrapper, 30*time.Second)
 	if err != nil {
 		fmt.Println("Failed to start rrdcached:", err)
 		panic(err)
 	}
-	fmt.Printf("rrdcached started on port %d", server.Port())
+	daemon = daemon_tmp
+	fmt.Printf("rrdcached started on port %d\n", daemon.Port())
+}
 
-	// Teardown (deferred)
-	defer func() {
-		if cmd != nil && cmd.Process != nil {
-			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-				fmt.Println("SIGTERM failed:", err)
-			}
-			server.Wait()
+func daemonStop() {
+	if cmd != nil && cmd.Process != nil {
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			fmt.Println("SIGTERM failed:", err)
 		}
-	}()
+		daemon.Wait()
+	}
+}
 
-	// Run tests
-	return m.Run()
+func daemonConnect() {
+	rrdcached = NewRrdcached("unix", SOCKET)
+	rrdcached.Connect()
+}
+
+func createFreshRRD(t *testing.T) {
+	ds := []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", "DS:test3:GAUGE:600:0:100", "DS:test4:GAUGE:600:0:100"}
+	rra := []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
+	resp := rrdcached.Create(RRD_FILE, -1, -1, false, ds, rra)
+	verifySuccessResponse(t, resp)
 }
 
 // ------------------------------------------
@@ -122,10 +139,19 @@ func verifyPendingResponseForN(t *testing.T, resp *Response, update_values []str
 	}
 }
 
+func verifyStatsFresh(t *testing.T, stats_diff map[string]uint64) {
+	stats := rrdcached.GetStats()
+	fmt.Printf(">> STATS << %+v\n", stats)
+	verifyStatsDiff(t, &Stats{}, stats, stats_diff)
+}
+
 func verifyStatsChange(t *testing.T, stats_pre *Stats, stats_post *Stats, stats_diff map[string]uint64) {
 	fmt.Printf(">> PRE << %+v\n", stats_pre)
 	fmt.Printf(">> POST << %+v\n", stats_post)
+	verifyStatsDiff(t, stats_pre, stats_post, stats_diff)
+}
 
+func verifyStatsDiff(t *testing.T, stats_pre *Stats, stats_post *Stats, stats_diff map[string]uint64) {
 	stats_pre_struct := reflect.Indirect(reflect.ValueOf(stats_pre))
 	stats_post_struct := reflect.Indirect(reflect.ValueOf(stats_post))
 
@@ -145,11 +171,31 @@ func verifyStatsChange(t *testing.T, stats_pre *Stats, stats_post *Stats, stats_
 // ------------------------------------------
 // Tests
 
+func TestCreate(t *testing.T) {
+	testSetup(t)
+	defer testTeardown()
+
+	ds := []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", "DS:test3:GAUGE:600:0:100", "DS:test4:GAUGE:600:0:100"}
+	rra := []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
+	resp := rrdcached.Create(RRD_FILE, -1, -1, true, ds, rra)
+	verifySuccessResponse(t, resp)
+
+	verifyStatsFresh(t, map[string]uint64{
+		"QueueLength":     0,
+		"UpdatesReceived": 0,
+		"FlushesReceived": 0,
+		"UpdatesWritten":  0,
+		"DataSetsWritten": 0,
+		"TreeNodesNumber": 0,
+		"TreeDepth":       0,
+		"JournalBytes":    0,
+		"JournalRotate":   0,
+	})
+}
+
 func TestUpdate(t *testing.T) {
-	rrdcached := NewRrdcached("unix", SOCKET)
-	rrdcached.Connect()
-	rrdcached.FlushAll()
-	stats_pre := rrdcached.GetStats()
+	testSetup(t)
+	defer testTeardown()
 
 	update_values1 := generateUpdateValues()
 	resp1 := rrdcached.Update(RRD_FILE, update_values1...)
@@ -159,18 +205,14 @@ func TestUpdate(t *testing.T) {
 	resp2 := rrdcached.Update(RRD_FILE, update_values2...)
 	verifyUpdateResponseForN(t, resp2, update_values2)
 
-	verifyStatsChange(t, stats_pre, rrdcached.GetStats(), map[string]uint64{
+	verifyStatsFresh(t, map[string]uint64{
 		"UpdatesReceived": 2,
 	})
-
-	rrdcached.Quit()
 }
 
 func TestPending(t *testing.T) {
-	rrdcached := NewRrdcached("unix", SOCKET)
-	rrdcached.Connect()
-	rrdcached.FlushAll()
-	stats_pre := rrdcached.GetStats()
+	testSetup(t)
+	defer testTeardown()
 
 	update_values := generateUpdateValues()
 
@@ -180,20 +222,16 @@ func TestPending(t *testing.T) {
 	resp = rrdcached.Pending(RRD_FILE)
 	verifyPendingResponseForN(t, resp, update_values)
 
-	verifyStatsChange(t, stats_pre, rrdcached.GetStats(), map[string]uint64{
+	verifyStatsFresh(t, map[string]uint64{
 		"UpdatesReceived": 1,
 		"UpdatesWritten":  0,
 		"DataSetsWritten": 0,
 	})
-
-	rrdcached.Quit()
 }
 
 func TestFlush(t *testing.T) {
-	rrdcached := NewRrdcached("unix", SOCKET)
-	rrdcached.Connect()
-	rrdcached.FlushAll()
-	stats_pre := rrdcached.GetStats()
+	testSetup(t)
+	defer testTeardown()
 
 	update_values := generateUpdateValues()
 
@@ -203,21 +241,17 @@ func TestFlush(t *testing.T) {
 	resp = rrdcached.Flush(RRD_FILE)
 	verifySuccessResponse(t, resp)
 
-	verifyStatsChange(t, stats_pre, rrdcached.GetStats(), map[string]uint64{
+	verifyStatsFresh(t, map[string]uint64{
 		"FlushesReceived": 1,
 		"UpdatesReceived": 1,
 		"UpdatesWritten":  1,
 		"DataSetsWritten": 4,
 	})
-
-	rrdcached.Quit()
 }
 
 func TestFlushAll(t *testing.T) {
-	rrdcached := NewRrdcached("unix", SOCKET)
-	rrdcached.Connect()
-	rrdcached.FlushAll()
-	stats_pre := rrdcached.GetStats()
+	testSetup(t)
+	defer testTeardown()
 
 	update_values := generateUpdateValues()
 
@@ -227,21 +261,17 @@ func TestFlushAll(t *testing.T) {
 	resp = rrdcached.FlushAll()
 	verifySuccessResponse(t, resp)
 
-	verifyStatsChange(t, stats_pre, rrdcached.GetStats(), map[string]uint64{
+	verifyStatsFresh(t, map[string]uint64{
 		"FlushesReceived": 0,
 		"UpdatesReceived": 1,
 		"UpdatesWritten":  1,
 		"DataSetsWritten": 4,
 	})
-
-	rrdcached.Quit()
 }
 
 func TestForget(t *testing.T) {
-	rrdcached := NewRrdcached("unix", SOCKET)
-	rrdcached.Connect()
-	rrdcached.FlushAll()
-	stats_pre := rrdcached.GetStats()
+	testSetup(t)
+	defer testTeardown()
 
 	update_values := generateUpdateValues()
 
@@ -251,12 +281,10 @@ func TestForget(t *testing.T) {
 	resp = rrdcached.Forget(RRD_FILE)
 	verifySuccessResponse(t, resp)
 
-	verifyStatsChange(t, stats_pre, rrdcached.GetStats(), map[string]uint64{
+	verifyStatsFresh(t, map[string]uint64{
 		"FlushesReceived": 0,
 		"UpdatesReceived": 1,
 		"UpdatesWritten":  0,
 		"DataSetsWritten": 0,
 	})
-
-	rrdcached.Quit()
 }
