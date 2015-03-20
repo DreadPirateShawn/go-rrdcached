@@ -22,9 +22,12 @@ var defineDS = []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", 
 var defineRRA = []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
 var rrdUpdates = []string{"10:20:30:40", "90:80:70:60", "25:35:45:55", "55:65:75:85"}
 
-var cmd *exec.Cmd
-var rrdcached *Rrdcached
-var daemon *tcptest.TCPTest
+var (
+	cmd         *exec.Cmd
+	driver_port int64
+	driver      *Rrdcached
+	daemon      *tcptest.TCPTest
+)
 
 // ------------------------------------------
 // Setup & Teardown
@@ -37,14 +40,15 @@ func testSetup(t *testing.T) {
 }
 
 func testTeardown() {
-	rrdcached.Quit() // Not strictly necessary, but it feels nice to call this.
-	daemonStop()     // Stop rrdcached daemon
+	driver.Quit() // Not strictly necessary, but it feels nice to call this.
+	daemonStop()  // Stop rrdcached daemon
 }
 
 func daemonStart() {
 	// Note: '-g' flag is crucial ("run in foreground"), otherwise rrdcached will run as a forked child process,
 	// and the parent (cmd) will exit and orphan the rrdcached process, leaving no (sane) way to tear it down.
 	cmd_wrapper := func(port int) {
+		driver_port = int64(port)
 		cmd = exec.Command("rrdcached", "-g",
 			"-p", fmt.Sprintf("%v/go-rrdached-test-%d.pid", TEST_DIR, port),
 			"-B", "-b", TEST_DIR,
@@ -76,12 +80,11 @@ func daemonStop() {
 }
 
 func daemonConnect() {
-	rrdcached = NewRrdcached("unix", SOCKET)
-	rrdcached.Connect()
+	driver = ConnectToSocket(SOCKET)
 }
 
 func createFreshRRD(t *testing.T) {
-	resp := rrdcached.Create(RRD_FILE, -1, -1, false, defineDS, defineRRA)
+	resp := driver.Create(RRD_FILE, -1, -1, false, defineDS, defineRRA)
 	verifySuccessResponse(t, resp)
 }
 
@@ -137,7 +140,7 @@ func verifyPendingResponseForN(t *testing.T, resp *Response, update_values []str
 }
 
 func verifyStatsFresh(t *testing.T, stats_diff map[string]uint64) {
-	stats := rrdcached.GetStats()
+	stats := driver.GetStats()
 	fmt.Printf(">> STATS << %+v\n", stats)
 	verifyStatsDiff(t, &Stats{}, stats, stats_diff)
 }
@@ -168,11 +171,22 @@ func verifyStatsDiff(t *testing.T, stats_pre *Stats, stats_post *Stats, stats_di
 // ------------------------------------------
 // Tests
 
+func TestConnect(t *testing.T) {
+	testSetup(t)
+	defer testTeardown()
+
+	test_driver1 := ConnectToSocket(SOCKET)
+	test_driver1.Quit()
+
+	test_driver2 := ConnectToIP("localhost", driver_port)
+	test_driver2.Quit()
+}
+
 func TestCreate(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	resp := rrdcached.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
+	resp := driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -193,11 +207,11 @@ func TestUpdate(t *testing.T) {
 	defer testTeardown()
 
 	update_values1 := generateTimestamps(rrdUpdates)
-	resp1 := rrdcached.Update(RRD_FILE, update_values1...)
+	resp1 := driver.Update(RRD_FILE, update_values1...)
 	verifyUpdateResponseForN(t, resp1, update_values1)
 
 	update_values2 := generateTimestamps(rrdUpdates)
-	resp2 := rrdcached.Update(RRD_FILE, update_values2...)
+	resp2 := driver.Update(RRD_FILE, update_values2...)
 	verifyUpdateResponseForN(t, resp2, update_values2)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -211,10 +225,10 @@ func TestPending(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := rrdcached.Update(RRD_FILE, update_values...)
+	resp := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = rrdcached.Pending(RRD_FILE)
+	resp = driver.Pending(RRD_FILE)
 	verifyPendingResponseForN(t, resp, update_values)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -230,10 +244,10 @@ func TestFlush(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := rrdcached.Update(RRD_FILE, update_values...)
+	resp := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = rrdcached.Flush(RRD_FILE)
+	resp = driver.Flush(RRD_FILE)
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -248,10 +262,10 @@ func TestFlushAll(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := rrdcached.Update(RRD_FILE, update_values...)
+	resp := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = rrdcached.FlushAll()
+	resp = driver.FlushAll()
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -266,10 +280,10 @@ func TestForget(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := rrdcached.Update(RRD_FILE, update_values...)
+	resp := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = rrdcached.Forget(RRD_FILE)
+	resp = driver.Forget(RRD_FILE)
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -284,7 +298,7 @@ func TestFirst(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	resp1 := rrdcached.First(RRD_FILE, 0)
+	resp1 := driver.First(RRD_FILE, 0)
 	verifySuccessResponse(t, resp1)
 
 	timestamp1, err1 := strconv.ParseUint(resp1.Message, 10, 64)
@@ -292,7 +306,7 @@ func TestFirst(t *testing.T) {
 		t.Errorf("FIRST timestamp %v is not parseable: %v", resp1.Message, err1)
 	}
 
-	resp2 := rrdcached.First(RRD_FILE, 1)
+	resp2 := driver.First(RRD_FILE, 1)
 	verifySuccessResponse(t, resp2)
 
 	timestamp2, err2 := strconv.ParseUint(resp2.Message, 10, 64)
@@ -309,7 +323,7 @@ func TestLast(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	resp := rrdcached.Last(RRD_FILE)
+	resp := driver.Last(RRD_FILE)
 	verifySuccessResponse(t, resp)
 
 	_, err := strconv.ParseUint(resp.Message, 10, 64)

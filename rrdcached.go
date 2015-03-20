@@ -13,21 +13,46 @@ import (
 type Rrdcached struct {
 	protocol string
 	socket   string
+	ip       string
+	port     int64
+	conn     net.Conn
 }
 
-func NewRrdcached(protocol string, socket string) *Rrdcached {
-	return &Rrdcached{
-		protocol: protocol,
+func ConnectToSocket(socket string) *Rrdcached {
+	driver := &Rrdcached{
+		protocol: "unix",
 		socket:   socket,
 	}
+	driver.connect()
+	return driver
 }
 
-func (r *Rrdcached) Connect() net.Conn {
-	conn, err := net.Dial(r.protocol, r.socket)
+func ConnectToIP(ip string, port int64) *Rrdcached {
+	driver := &Rrdcached{
+		protocol: "tcp",
+		ip:       ip,
+		port:     port,
+	}
+	driver.connect()
+	return driver
+}
+
+func (r *Rrdcached) connect() {
+	var target string
+
+	if r.protocol == "unix" {
+		target = r.socket
+	} else if r.protocol == "tcp" {
+		target = r.ip + ":" + strconv.FormatInt(r.port, 10)
+	} else {
+		panic(fmt.Sprintf("Protocol %v is not recognized: %+v", r.protocol, r))
+	}
+
+	conn, err := net.Dial(r.protocol, target)
 	if err != nil {
 		panic(err)
 	}
-	return conn
+	r.conn = conn
 }
 
 type Stats struct {
@@ -157,17 +182,12 @@ func NowString() string {
 // ----------------------------------------------------------
 
 func (r *Rrdcached) GetStats() *Stats {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "STATS\n")
-	data := readData(conn)
+	writeData(r.conn, "STATS\n")
+	data := readData(r.conn)
 	return parseStats(data)
 }
 
 func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite bool, ds []string, rra []string) *Response {
-	conn := r.Connect()
-	defer conn.Close()
-
 	var params []string
 	if start >= 0 {
 		params = append(params, string(start))
@@ -185,61 +205,45 @@ func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite b
 		params = append(params, strings.Join(rra, " "))
 	}
 
-	writeData(conn, "CREATE "+filename+" "+strings.Join(params, " ")+"\n")
-	return checkResponse(conn)
+	writeData(r.conn, "CREATE "+filename+" "+strings.Join(params, " ")+"\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) Update(filename string, values ...string) *Response {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "UPDATE "+filename+" "+strings.Join(values, " ")+"\n")
-	return checkResponse(conn)
+	writeData(r.conn, "UPDATE "+filename+" "+strings.Join(values, " ")+"\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) Pending(filename string) *Response {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "PENDING "+filename+"\n")
-	return checkResponse(conn)
+	writeData(r.conn, "PENDING "+filename+"\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) Forget(filename string) *Response {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "FORGET "+filename+"\n")
-	return checkResponse(conn)
+	writeData(r.conn, "FORGET "+filename+"\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) Flush(filename string) *Response {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "FLUSH "+filename+"\n")
-	return checkResponse(conn)
+	writeData(r.conn, "FLUSH "+filename+"\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) FlushAll() *Response {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "FLUSHALL\n")
-	return checkResponse(conn)
+	writeData(r.conn, "FLUSHALL\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) First(filename string, rraIndex int) *Response {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "FIRST "+filename+" "+string(rraIndex)+"\n")
-	return checkResponse(conn)
+	writeData(r.conn, "FIRST "+filename+" "+string(rraIndex)+"\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) Last(filename string) *Response {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "LAST "+filename+"\n")
-	return checkResponse(conn)
+	writeData(r.conn, "LAST "+filename+"\n")
+	return checkResponse(r.conn)
 }
 
 func (r *Rrdcached) Quit() {
-	conn := r.Connect()
-	defer conn.Close()
-	writeData(conn, "QUIT\n")
+	writeData(r.conn, "QUIT\n")
 }
