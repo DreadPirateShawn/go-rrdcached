@@ -18,6 +18,10 @@ const TEST_DIR = "/tmp"
 const SOCKET = TEST_DIR + "/go-rrdcached-test.sock"
 const RRD_FILE = TEST_DIR + "/go-rrdcached-test.rrd"
 
+var defineDS = []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", "DS:test3:GAUGE:600:0:100", "DS:test4:GAUGE:600:0:100"}
+var defineRRA = []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
+var rrdUpdates = []string{"10:20:30:40", "90:80:70:60", "25:35:45:55", "55:65:75:85"}
+
 var cmd *exec.Cmd
 var rrdcached *Rrdcached
 var daemon *tcptest.TCPTest
@@ -77,26 +81,19 @@ func daemonConnect() {
 }
 
 func createFreshRRD(t *testing.T) {
-	ds := []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", "DS:test3:GAUGE:600:0:100", "DS:test4:GAUGE:600:0:100"}
-	rra := []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
-	resp := rrdcached.Create(RRD_FILE, -1, -1, false, ds, rra)
+	resp := rrdcached.Create(RRD_FILE, -1, -1, false, defineDS, defineRRA)
 	verifySuccessResponse(t, resp)
 }
 
 // ------------------------------------------
 // Helper Fixtures
 
-func generateTimestamps(values []string) {
+func generateTimestamps(values []string) []string {
 	for i := 0; i < len(values); i++ {
 		values[i] = NowString() + ":" + values[i]
 		time.Sleep(1 * time.Second)
 	}
-}
-
-func generateUpdateValues() []string {
-	update_values := []string{"10:20:30:40", "90:80:70:60", "25:35:45:55", "55:65:75:85"}
-	generateTimestamps(update_values)
-	return update_values
+	return values
 }
 
 // ------------------------------------------
@@ -175,9 +172,7 @@ func TestCreate(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	ds := []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", "DS:test3:GAUGE:600:0:100", "DS:test4:GAUGE:600:0:100"}
-	rra := []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
-	resp := rrdcached.Create(RRD_FILE, -1, -1, true, ds, rra)
+	resp := rrdcached.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -197,11 +192,11 @@ func TestUpdate(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	update_values1 := generateUpdateValues()
+	update_values1 := generateTimestamps(rrdUpdates)
 	resp1 := rrdcached.Update(RRD_FILE, update_values1...)
 	verifyUpdateResponseForN(t, resp1, update_values1)
 
-	update_values2 := generateUpdateValues()
+	update_values2 := generateTimestamps(rrdUpdates)
 	resp2 := rrdcached.Update(RRD_FILE, update_values2...)
 	verifyUpdateResponseForN(t, resp2, update_values2)
 
@@ -214,7 +209,7 @@ func TestPending(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	update_values := generateUpdateValues()
+	update_values := generateTimestamps(rrdUpdates)
 
 	resp := rrdcached.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
@@ -233,7 +228,7 @@ func TestFlush(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	update_values := generateUpdateValues()
+	update_values := generateTimestamps(rrdUpdates)
 
 	resp := rrdcached.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
@@ -244,8 +239,6 @@ func TestFlush(t *testing.T) {
 	verifyStatsFresh(t, map[string]uint64{
 		"FlushesReceived": 1,
 		"UpdatesReceived": 1,
-		"UpdatesWritten":  1,
-		"DataSetsWritten": 4,
 	})
 }
 
@@ -253,7 +246,7 @@ func TestFlushAll(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	update_values := generateUpdateValues()
+	update_values := generateTimestamps(rrdUpdates)
 
 	resp := rrdcached.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
@@ -264,8 +257,6 @@ func TestFlushAll(t *testing.T) {
 	verifyStatsFresh(t, map[string]uint64{
 		"FlushesReceived": 0,
 		"UpdatesReceived": 1,
-		"UpdatesWritten":  1,
-		"DataSetsWritten": 4,
 	})
 }
 
@@ -273,7 +264,7 @@ func TestForget(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	update_values := generateUpdateValues()
+	update_values := generateTimestamps(rrdUpdates)
 
 	resp := rrdcached.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
@@ -287,4 +278,42 @@ func TestForget(t *testing.T) {
 		"UpdatesWritten":  0,
 		"DataSetsWritten": 0,
 	})
+}
+
+func TestFirst(t *testing.T) {
+	testSetup(t)
+	defer testTeardown()
+
+	resp1 := rrdcached.First(RRD_FILE, 0)
+	verifySuccessResponse(t, resp1)
+
+	timestamp1, err1 := strconv.ParseUint(resp1.Message, 10, 64)
+	if err1 != nil {
+		t.Errorf("FIRST timestamp %v is not parseable: %v", resp1.Message, err1)
+	}
+
+	resp2 := rrdcached.First(RRD_FILE, 1)
+	verifySuccessResponse(t, resp2)
+
+	timestamp2, err2 := strconv.ParseUint(resp2.Message, 10, 64)
+	if err2 != nil {
+		t.Errorf("FIRST timestamp %v is not parseable: %v", resp2.Message, err2)
+	}
+
+	if timestamp1 != timestamp2 {
+		t.Errorf("FIRST timestamps are not consistent: %d != %d", timestamp1, timestamp2)
+	}
+}
+
+func TestLast(t *testing.T) {
+	testSetup(t)
+	defer testTeardown()
+
+	resp := rrdcached.Last(RRD_FILE)
+	verifySuccessResponse(t, resp)
+
+	_, err := strconv.ParseUint(resp.Message, 10, 64)
+	if err != nil {
+		t.Errorf("LAST timestamp %v is not parseable: %v", resp.Message, err)
+	}
 }

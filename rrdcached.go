@@ -224,6 +224,20 @@ func (r *Rrdcached) FlushAll() *Response {
 	return checkResponse(conn)
 }
 
+func (r *Rrdcached) First(filename string, rraIndex int) *Response {
+	conn := r.Connect()
+	defer conn.Close()
+	writeData(conn, "FIRST "+filename+" "+string(rraIndex)+"\n")
+	return checkResponse(conn)
+}
+
+func (r *Rrdcached) Last(filename string) *Response {
+	conn := r.Connect()
+	defer conn.Close()
+	writeData(conn, "LAST "+filename+"\n")
+	return checkResponse(conn)
+}
+
 func (r *Rrdcached) Quit() {
 	conn := r.Connect()
 	defer conn.Close()
