@@ -186,10 +186,7 @@ func TestCreate(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	resp := driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
-	verifySuccessResponse(t, resp)
-
-	verifyStatsFresh(t, map[string]uint64{
+	initialStats := map[string]uint64{
 		"QueueLength":     0,
 		"UpdatesReceived": 0,
 		"FlushesReceived": 0,
@@ -199,7 +196,21 @@ func TestCreate(t *testing.T) {
 		"TreeDepth":       0,
 		"JournalBytes":    0,
 		"JournalRotate":   0,
-	})
+	}
+
+	now := int64(float64(time.Now().UnixNano()) / float64(time.Second))
+
+	resp1 := driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
+	verifySuccessResponse(t, resp1)
+	verifyStatsFresh(t, initialStats)
+
+	resp2 := driver.Create(RRD_FILE, now, -1, true, defineDS, defineRRA)
+	verifySuccessResponse(t, resp2)
+	verifyStatsFresh(t, initialStats)
+
+	resp3 := driver.Create(RRD_FILE, now, 10, true, defineDS, defineRRA)
+	verifySuccessResponse(t, resp3)
+	verifyStatsFresh(t, initialStats)
 }
 
 func TestUpdate(t *testing.T) {

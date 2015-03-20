@@ -190,10 +190,10 @@ func (r *Rrdcached) GetStats() *Stats {
 func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite bool, ds []string, rra []string) *Response {
 	var params []string
 	if start >= 0 {
-		params = append(params, string(start))
+		params = append(params, fmt.Sprintf("-b %d", start))
 	}
 	if step >= 0 {
-		params = append(params, string(step))
+		params = append(params, fmt.Sprintf("-s %d", step))
 	}
 	if !overwrite {
 		params = append(params, "-O")
