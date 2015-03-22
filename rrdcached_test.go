@@ -49,11 +49,16 @@ func daemonStart() {
 	// and the parent (cmd) will exit and orphan the rrdcached process, leaving no (sane) way to tear it down.
 	cmd_wrapper := func(port int) {
 		driver_port = int64(port)
-		cmd = exec.Command("rrdcached", "-g",
+
+		var cmd_args = []string{"-g",
 			"-p", fmt.Sprintf("%v/go-rrdached-test-%d.pid", TEST_DIR, port),
 			"-B", "-b", TEST_DIR,
 			"-l", SOCKET,
-			"-l", fmt.Sprintf("0.0.0.0:%d", port))
+			"-l", fmt.Sprintf("0.0.0.0:%d", port)}
+
+		fmt.Printf("======\nDaemon: rrdcached %v\n-------\n", strings.Join(cmd_args, " "))
+
+		cmd = exec.Command("rrdcached", cmd_args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Setpgid: true,
 		}
