@@ -16,7 +16,8 @@ import (
 
 const TEST_DIR = "/tmp"
 const SOCKET = TEST_DIR + "/go-rrdcached-test.sock"
-const RRD_FILE = TEST_DIR + "/go-rrdcached-test.rrd"
+const RRD_FILE = "foo-subdir/go-rrdcached-test.rrd"
+const RRD_FILE_FULL = TEST_DIR + "/" + RRD_FILE
 
 var defineDS = []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", "DS:test3:GAUGE:600:0:100", "DS:test4:GAUGE:600:0:100"}
 var defineRRA = []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
@@ -33,10 +34,10 @@ var (
 // Setup & Teardown
 
 func testSetup(t *testing.T) {
-	os.Remove(RRD_FILE) // Remove existing RRD file
-	daemonStart()       // Start rrdcached daemon
-	daemonConnect()     // Connect to rrdcached
-	createFreshRRD(t)   // Create fresh RRD
+	os.Remove(RRD_FILE_FULL) // Remove existing RRD file
+	daemonStart()            // Start rrdcached daemon
+	daemonConnect()          // Connect to rrdcached
+	createFreshRRD(t)        // Create fresh RRD
 }
 
 func testTeardown() {
@@ -51,6 +52,7 @@ func daemonStart() {
 		driver_port = int64(port)
 
 		var cmd_args = []string{"-g",
+			"-R",
 			"-p", fmt.Sprintf("%v/go-rrdached-test-%d.pid", TEST_DIR, port),
 			"-B", "-b", TEST_DIR,
 			"-l", SOCKET,
