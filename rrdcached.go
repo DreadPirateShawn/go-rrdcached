@@ -72,32 +72,32 @@ type Stats struct {
 // ----------------------------------------------------------
 
 type UnknownCommandError struct {
-	msg string
+	Err error
 }
 
 func (f *UnknownCommandError) Error() string {
-	return f.msg
+	return f.Err.Error()
 }
 
 type FileDoesNotExistError struct {
-	msg string
+	Err error
 }
 
 func (f *FileDoesNotExistError) Error() string {
-	return f.msg
+	return f.Err.Error()
 }
 
 type UnrecognizedArgumentError struct {
-	msg string
+	Err error
 }
 
 func (f *UnrecognizedArgumentError) Error() string {
-	return f.msg
+	return f.Err.Error()
 }
 
 func (f *UnrecognizedArgumentError) BadArgument() string {
 	re := regexp.MustCompile(`can't parse argument '(.+)'`)
-	matches := re.FindStringSubmatch(f.msg)
+	matches := re.FindStringSubmatch(f.Error())
 	if matches != nil {
 		return matches[1]
 	} else {
@@ -204,15 +204,14 @@ func checkResponse(conn net.Conn) (*Response, error) {
 
 	var err error
 	if int(status) == -1 {
+		err = errors.New(lines[1])
 		switch {
 		case strings.HasPrefix(lines[1], "Unknown command"):
-			err = &UnknownCommandError{lines[1]}
+			err = &UnknownCommandError{err}
 		case strings.HasPrefix(lines[1], "No such file"):
-			err = &FileDoesNotExistError{lines[1]}
+			err = &FileDoesNotExistError{err}
 		case strings.Contains(lines[1], "can't parse argument"):
-			err = &UnrecognizedArgumentError{lines[1]}
-		default:
-			err = errors.New(lines[1])
+			err = &UnrecognizedArgumentError{err}
 		}
 	}
 
