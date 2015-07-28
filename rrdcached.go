@@ -1,10 +1,12 @@
 package rrdcached
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +67,42 @@ type Stats struct {
 	TreeDepth       uint64
 	JournalBytes    uint64
 	JournalRotate   uint64
+}
+
+// ----------------------------------------------------------
+
+type UnknownCommandError struct {
+	msg string
+}
+
+func (f *UnknownCommandError) Error() string {
+	return f.msg
+}
+
+type FileDoesNotExistError struct {
+	msg string
+}
+
+func (f *FileDoesNotExistError) Error() string {
+	return f.msg
+}
+
+type UnrecognizedArgumentError struct {
+	msg string
+}
+
+func (f *UnrecognizedArgumentError) Error() string {
+	return f.msg
+}
+
+func (f *UnrecognizedArgumentError) BadArgument() string {
+	re := regexp.MustCompile(`can't parse argument '(.+)'`)
+	matches := re.FindStringSubmatch(f.msg)
+	if matches != nil {
+		return matches[1]
+	} else {
+		return ""
+	}
 }
 
 // ---------------------------------------------
@@ -155,7 +193,7 @@ type Response struct {
 	Raw     string
 }
 
-func checkResponse(conn net.Conn) *Response {
+func checkResponse(conn net.Conn) (*Response, error) {
 	data := readData(conn)
 	data = strings.TrimSpace(data)
 	fmt.Println(data)
@@ -164,11 +202,25 @@ func checkResponse(conn net.Conn) *Response {
 
 	status, _ := strconv.ParseInt(lines[0], 10, 0)
 
+	var err error
+	if int(status) == -1 {
+		switch {
+		case strings.HasPrefix(lines[1], "Unknown command"):
+			err = &UnknownCommandError{lines[1]}
+		case strings.HasPrefix(lines[1], "No such file"):
+			err = &FileDoesNotExistError{lines[1]}
+		case strings.Contains(lines[1], "can't parse argument"):
+			err = &UnrecognizedArgumentError{lines[1]}
+		default:
+			err = errors.New(lines[1])
+		}
+	}
+
 	return &Response{
 		Status:  int(status),
 		Message: lines[1],
 		Raw:     data,
-	}
+	}, err
 }
 
 func NowString() string {
@@ -187,7 +239,7 @@ func (r *Rrdcached) GetStats() *Stats {
 	return parseStats(data)
 }
 
-func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite bool, ds []string, rra []string) *Response {
+func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite bool, ds []string, rra []string) (*Response, error) {
 	var params []string
 	if start >= 0 {
 		params = append(params, fmt.Sprintf("-b %d", start))
@@ -209,37 +261,37 @@ func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite b
 	return checkResponse(r.Conn)
 }
 
-func (r *Rrdcached) Update(filename string, values ...string) *Response {
+func (r *Rrdcached) Update(filename string, values ...string) (*Response, error) {
 	writeData(r.Conn, "UPDATE "+filename+" "+strings.Join(values, " ")+"\n")
 	return checkResponse(r.Conn)
 }
 
-func (r *Rrdcached) Pending(filename string) *Response {
+func (r *Rrdcached) Pending(filename string) (*Response, error) {
 	writeData(r.Conn, "PENDING "+filename+"\n")
 	return checkResponse(r.Conn)
 }
 
-func (r *Rrdcached) Forget(filename string) *Response {
+func (r *Rrdcached) Forget(filename string) (*Response, error) {
 	writeData(r.Conn, "FORGET "+filename+"\n")
 	return checkResponse(r.Conn)
 }
 
-func (r *Rrdcached) Flush(filename string) *Response {
+func (r *Rrdcached) Flush(filename string) (*Response, error) {
 	writeData(r.Conn, "FLUSH "+filename+"\n")
 	return checkResponse(r.Conn)
 }
 
-func (r *Rrdcached) FlushAll() *Response {
+func (r *Rrdcached) FlushAll() (*Response, error) {
 	writeData(r.Conn, "FLUSHALL\n")
 	return checkResponse(r.Conn)
 }
 
-func (r *Rrdcached) First(filename string, rraIndex int) *Response {
+func (r *Rrdcached) First(filename string, rraIndex int) (*Response, error) {
 	writeData(r.Conn, "FIRST "+filename+" "+string(rraIndex)+"\n")
 	return checkResponse(r.Conn)
 }
 
-func (r *Rrdcached) Last(filename string) *Response {
+func (r *Rrdcached) Last(filename string) (*Response, error) {
 	writeData(r.Conn, "LAST "+filename+"\n")
 	return checkResponse(r.Conn)
 }
