@@ -91,7 +91,18 @@ func daemonConnect() {
 }
 
 func createFreshRRD(t *testing.T) {
-	resp := driver.Create(RRD_FILE, -1, -1, false, defineDS, defineRRA)
+	// Note: The '-O' flag is only recently supported, manually remove RRD file otherwise.
+	// TODO: Convert most existing tests to system tests, update unit tests to be system agnostic.
+	resp, err := driver.Create(RRD_FILE, -1, -1, false, defineDS, defineRRA)
+	if err != nil {
+		if cmderr, ok := err.(*UnrecognizedArgumentError); ok {
+			if cmderr.BadArgument() == "-O" {
+				fmt.Println("Warning: CREATE with '-O' is unsupported on this system.")
+				os.Remove(RRD_FILE)
+				resp, _ = driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
+			}
+		}
+	}
 	verifySuccessResponse(t, resp)
 }
 
@@ -207,15 +218,18 @@ func TestCreate(t *testing.T) {
 
 	now := int64(float64(time.Now().UnixNano()) / float64(time.Second))
 
-	resp1 := driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
+	os.Remove(RRD_FILE_FULL)
+	resp1, _ := driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
 	verifySuccessResponse(t, resp1)
 	verifyStatsFresh(t, initialStats)
 
-	resp2 := driver.Create(RRD_FILE, now, -1, true, defineDS, defineRRA)
+	os.Remove(RRD_FILE_FULL)
+	resp2, _ := driver.Create(RRD_FILE, now, -1, true, defineDS, defineRRA)
 	verifySuccessResponse(t, resp2)
 	verifyStatsFresh(t, initialStats)
 
-	resp3 := driver.Create(RRD_FILE, now, 10, true, defineDS, defineRRA)
+	os.Remove(RRD_FILE_FULL)
+	resp3, _ := driver.Create(RRD_FILE, now, 10, true, defineDS, defineRRA)
 	verifySuccessResponse(t, resp3)
 	verifyStatsFresh(t, initialStats)
 }
@@ -225,16 +239,31 @@ func TestUpdate(t *testing.T) {
 	defer testTeardown()
 
 	update_values1 := generateTimestamps(rrdUpdates)
-	resp1 := driver.Update(RRD_FILE, update_values1...)
+	resp1, _ := driver.Update(RRD_FILE, update_values1...)
 	verifyUpdateResponseForN(t, resp1, update_values1)
 
 	update_values2 := generateTimestamps(rrdUpdates)
-	resp2 := driver.Update(RRD_FILE, update_values2...)
+	resp2, _ := driver.Update(RRD_FILE, update_values2...)
 	verifyUpdateResponseForN(t, resp2, update_values2)
 
 	verifyStatsFresh(t, map[string]uint64{
 		"UpdatesReceived": 2,
 	})
+}
+
+func TestUpdateWithoutExistingRRD(t *testing.T) {
+	testSetup(t)
+	os.Remove(RRD_FILE_FULL) // Remove existing RRD file
+	defer testTeardown()
+
+	update_values1 := generateTimestamps(rrdUpdates)
+	_, err := driver.Update(RRD_FILE, update_values1...)
+	if err == nil {
+		t.Error("Error expected from Update of a non-existing RRD file, but no error received.")
+	}
+	if _, ok := err.(*FileDoesNotExistError); !ok {
+		t.Errorf("FileDoesNotExistError expected from Update of a non-existing RRD file, but %T received.", err)
+	}
 }
 
 func TestPending(t *testing.T) {
@@ -243,10 +272,10 @@ func TestPending(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := driver.Update(RRD_FILE, update_values...)
+	resp, _ := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = driver.Pending(RRD_FILE)
+	resp, _ = driver.Pending(RRD_FILE)
 	verifyPendingResponseForN(t, resp, update_values)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -262,10 +291,10 @@ func TestFlush(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := driver.Update(RRD_FILE, update_values...)
+	resp, _ := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = driver.Flush(RRD_FILE)
+	resp, _ = driver.Flush(RRD_FILE)
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -280,10 +309,10 @@ func TestFlushAll(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := driver.Update(RRD_FILE, update_values...)
+	resp, _ := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = driver.FlushAll()
+	resp, _ = driver.FlushAll()
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -298,10 +327,10 @@ func TestForget(t *testing.T) {
 
 	update_values := generateTimestamps(rrdUpdates)
 
-	resp := driver.Update(RRD_FILE, update_values...)
+	resp, _ := driver.Update(RRD_FILE, update_values...)
 	verifyUpdateResponseForN(t, resp, update_values)
 
-	resp = driver.Forget(RRD_FILE)
+	resp, _ = driver.Forget(RRD_FILE)
 	verifySuccessResponse(t, resp)
 
 	verifyStatsFresh(t, map[string]uint64{
@@ -316,7 +345,16 @@ func TestFirst(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	resp1 := driver.First(RRD_FILE, 0)
+	// Note: The FIRST command is only recently supported.
+	// Tests included for completeness, but lack of support shouldn't cause test failure.
+	// TODO: Convert these to system tests, update unit tests to be system agnostic.
+	resp1, cmderr := driver.First(RRD_FILE, 0)
+	if cmderr != nil {
+		if _, ok := cmderr.(*UnknownCommandError); ok {
+			fmt.Println("Warning: FIRST is unsupported on this system.")
+			return
+		}
+	}
 	verifySuccessResponse(t, resp1)
 
 	timestamp1, err1 := strconv.ParseUint(resp1.Message, 10, 64)
@@ -324,7 +362,7 @@ func TestFirst(t *testing.T) {
 		t.Errorf("FIRST timestamp %v is not parseable: %v", resp1.Message, err1)
 	}
 
-	resp2 := driver.First(RRD_FILE, 1)
+	resp2, _ := driver.First(RRD_FILE, 1)
 	verifySuccessResponse(t, resp2)
 
 	timestamp2, err2 := strconv.ParseUint(resp2.Message, 10, 64)
@@ -341,7 +379,16 @@ func TestLast(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	resp := driver.Last(RRD_FILE)
+	// Note: The LAST command is only recently supported.
+	// Tests included for completeness, but lack of support shouldn't cause test failure.
+	// TODO: Convert these to system tests, update unit tests to be system agnostic.
+	resp, cmderr := driver.Last(RRD_FILE)
+	if cmderr != nil {
+		if _, ok := cmderr.(*UnknownCommandError); ok {
+			fmt.Println("Warning: LAST is unsupported on this system.")
+			return
+		}
+	}
 	verifySuccessResponse(t, resp)
 
 	_, err := strconv.ParseUint(resp.Message, 10, 64)
