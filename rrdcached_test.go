@@ -2,397 +2,240 @@ package rrdcached
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"reflect"
-	"strconv"
-	"strings"
-	"syscall"
+	"io"
+	"net"
 	"testing"
-	"time"
 
-	"github.com/lestrrat/go-tcptest"
+	"github.com/stretchr/testify/assert"
 )
 
-const TEST_DIR = "/tmp"
-const SOCKET = TEST_DIR + "/go-rrdcached-test.sock"
-const RRD_FILE = "foo-subdir/go-rrdcached-test.rrd"
-const RRD_FILE_FULL = TEST_DIR + "/" + RRD_FILE
-
-var defineDS = []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100", "DS:test3:GAUGE:600:0:100", "DS:test4:GAUGE:600:0:100"}
-var defineRRA = []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
-var rrdUpdates = []string{"10:20:30:40", "90:80:70:60", "25:35:45:55", "55:65:75:85"}
-
-var (
-	cmd         *exec.Cmd
-	driver_port int64
-	driver      *Rrdcached
-	daemon      *tcptest.TCPTest
-)
-
-// ------------------------------------------
-// Setup & Teardown
-
-func testSetup(t *testing.T) {
-	os.Remove(RRD_FILE_FULL) // Remove existing RRD file
-	daemonStart()            // Start rrdcached daemon
-	daemonConnect()          // Connect to rrdcached
-	createFreshRRD(t)        // Create fresh RRD
+type fakeDataTransport struct {
+	written  string
+	response string
 }
 
-func testTeardown() {
-	driver.Quit() // Not strictly necessary, but it feels nice to call this.
-	daemonStop()  // Stop rrdcached daemon
+func (rrdio *fakeDataTransport) WriteData(conn net.Conn, data string) {
+	fmt.Print("===== WriteData =====\n")
+	fmt.Printf("%+v\n", rrdio)
+	rrdio.written = data
 }
 
-func daemonStart() {
-	// Note: '-g' flag is crucial ("run in foreground"), otherwise rrdcached will run as a forked child process,
-	// and the parent (cmd) will exit and orphan the rrdcached process, leaving no (sane) way to tear it down.
-	cmd_wrapper := func(port int) {
-		driver_port = int64(port)
-
-		var cmd_args = []string{"-g",
-			"-R",
-			"-p", fmt.Sprintf("%v/go-rrdached-test-%d.pid", TEST_DIR, port),
-			"-B", "-b", TEST_DIR,
-			"-l", SOCKET,
-			"-l", fmt.Sprintf("0.0.0.0:%d", port)}
-
-		fmt.Printf("======\nDaemon: rrdcached %v\n-------\n", strings.Join(cmd_args, " "))
-
-		cmd = exec.Command("rrdcached", cmd_args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setpgid: true,
-		}
-		cmd.Run()
-	}
-
-	// daemon is a global, but err is new. Using "daemon, err :=" creates a local shadowed variable "daemon". Thus the tmp var.
-	daemon_tmp, err := tcptest.Start(cmd_wrapper, 30*time.Second)
-	if err != nil {
-		fmt.Println("Failed to start rrdcached:", err)
-		panic(err)
-	}
-	daemon = daemon_tmp
-	fmt.Printf("rrdcached started on port %d\n", daemon.Port())
+func (rrdio *fakeDataTransport) ReadData(r io.Reader) string {
+	return rrdio.response
 }
 
-func daemonStop() {
-	if cmd != nil && cmd.Process != nil {
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			fmt.Println("SIGTERM failed:", err)
-		}
-		daemon.Wait()
-	}
-}
-
-func daemonConnect() {
-	driver = ConnectToSocket(SOCKET)
-}
-
-func createFreshRRD(t *testing.T) {
-	// Note: The '-O' flag is only recently supported, manually remove RRD file otherwise.
-	// TODO: Convert most existing tests to system tests, update unit tests to be system agnostic.
-	resp, err := driver.Create(RRD_FILE, -1, -1, false, defineDS, defineRRA)
-	if err != nil {
-		if cmderr, ok := err.(*UnrecognizedArgumentError); ok {
-			if cmderr.BadArgument() == "-O" {
-				fmt.Println("Warning: CREATE with '-O' is unsupported on this system.")
-				os.Remove(RRD_FILE)
-				resp, _ = driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
-			}
-		}
-	}
-	verifySuccessResponse(t, resp)
-}
-
-// ------------------------------------------
-// Helper Fixtures
-
-func generateTimestamps(values []string) []string {
-	for i := 0; i < len(values); i++ {
-		values[i] = NowString() + ":" + values[i]
-		time.Sleep(1 * time.Second)
-	}
-	return values
-}
-
-// ------------------------------------------
-// Helper Validations
-
-func verifySuccessResponse(t *testing.T, resp *Response) {
-	if resp.Status != 0 {
-		t.Errorf("Status %v != success (0), message: \"%v\"", resp.Status, resp.Message)
-	}
-}
-
-func verifyUpdateResponseForN(t *testing.T, resp *Response, update_values []string) {
-	if resp.Status != 0 {
-		t.Errorf("Status %v != success (0), message: \"%v\"", resp.Status, resp.Message)
-	} else {
-		update_count := int64(len(update_values))
-		expected := "0 errors, enqueued " + strconv.FormatInt(update_count, 10)
-		if !strings.Contains(resp.Raw, expected) {
-			t.Errorf("Raw message response does not contain \"%v\" - actual: \"%v\"", expected, resp.Raw)
-		}
-	}
-}
-
-func verifyPendingResponseForN(t *testing.T, resp *Response, update_values []string) {
-	if resp.Status < 0 {
-		t.Errorf("Status error %v, message: \"%v\"", resp.Status, resp.Message)
-	} else {
-		expected := strconv.FormatInt(int64(len(update_values)), 10) + " updates pending"
-		if !strings.Contains(resp.Raw, expected) {
-			t.Errorf("Raw message response does not contain \"%v\"", expected)
-		}
-		for i := 0; i < len(update_values); i++ {
-			if !strings.Contains(resp.Raw, update_values[i]) {
-				t.Errorf("Update value \"%v\" not found in pending updates", update_values[i])
-			}
-		}
-		if t.Failed() {
-			t.Logf("Raw pending updates:\n%v", resp.Raw)
-		}
-	}
-}
-
-func verifyStatsFresh(t *testing.T, stats_diff map[string]uint64) {
-	stats := driver.GetStats()
-	fmt.Printf(">> STATS << %+v\n", stats)
-	verifyStatsDiff(t, &Stats{}, stats, stats_diff)
-}
-
-func verifyStatsChange(t *testing.T, stats_pre *Stats, stats_post *Stats, stats_diff map[string]uint64) {
-	fmt.Printf(">> PRE << %+v\n", stats_pre)
-	fmt.Printf(">> POST << %+v\n", stats_post)
-	verifyStatsDiff(t, stats_pre, stats_post, stats_diff)
-}
-
-func verifyStatsDiff(t *testing.T, stats_pre *Stats, stats_post *Stats, stats_diff map[string]uint64) {
-	stats_pre_struct := reflect.Indirect(reflect.ValueOf(stats_pre))
-	stats_post_struct := reflect.Indirect(reflect.ValueOf(stats_post))
-
-	for key, expected_value := range stats_diff {
-		value_pre := stats_pre_struct.FieldByName(key).Uint()
-		value_post := stats_post_struct.FieldByName(key).Uint()
-
-		actual_value := uint64(value_post - value_pre)
-
-		fmt.Printf("%v: Expected %v, got %v\n", key, expected_value, actual_value)
-		if expected_value != actual_value {
-			t.Errorf("%v: Expected %v, got %v", key, expected_value, actual_value)
-		}
-	}
+func prepTestData(fakeWritten string, fakeResponse string) (expected *fakeDataTransport, fakeDriver *Rrdcached) {
+	expected = &fakeDataTransport{fakeWritten, fakeResponse}
+	fakeDriver = &Rrdcached{Rrdio: &fakeDataTransport{response: fakeResponse}}
+	return expected, fakeDriver
 }
 
 // ------------------------------------------
 // Tests
 
-func TestConnect(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
-
-	test_driver1 := ConnectToSocket(SOCKET)
-	test_driver1.Quit()
-
-	test_driver2 := ConnectToIP("localhost", driver_port)
-	test_driver2.Quit()
-}
+var (
+	testDefineDS  = []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100"}
+	testDefineRRA = []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
+)
 
 func TestCreate(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
+	expected, fakeDriver := prepTestData(
+		"CREATE foo.rrd -O DS:test1:GAUGE:600:0:100 DS:test2:GAUGE:600:0:100 RRA:MIN:0.5:12:1440 RRA:MAX:0.5:12:1440 RRA:AVERAGE:0.5:1:1440\n",
+		"0 RRD created successfully (/tmp/foo.rrd)",
+	)
 
-	initialStats := map[string]uint64{
-		"QueueLength":     0,
-		"UpdatesReceived": 0,
-		"FlushesReceived": 0,
-		"UpdatesWritten":  0,
-		"DataSetsWritten": 0,
-		"TreeNodesNumber": 0,
-		"TreeDepth":       0,
-		"JournalBytes":    0,
-		"JournalRotate":   0,
-	}
+	resp, err := fakeDriver.Create("foo.rrd", -1, -1, false, testDefineDS, testDefineRRA)
 
-	now := int64(float64(time.Now().UnixNano()) / float64(time.Second))
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
 
-	os.Remove(RRD_FILE_FULL)
-	resp1, _ := driver.Create(RRD_FILE, -1, -1, true, defineDS, defineRRA)
-	verifySuccessResponse(t, resp1)
-	verifyStatsFresh(t, initialStats)
+func TestCreateWithStartAndStepAndOverwrite(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"CREATE foo.rrd -b 1438354678 -s 10 DS:test1:GAUGE:600:0:100 DS:test2:GAUGE:600:0:100 RRA:MIN:0.5:12:1440 RRA:MAX:0.5:12:1440 RRA:AVERAGE:0.5:1:1440\n",
+		"0 RRD created successfully (/tmp/foo.rrd)",
+	)
 
-	os.Remove(RRD_FILE_FULL)
-	resp2, _ := driver.Create(RRD_FILE, now, -1, true, defineDS, defineRRA)
-	verifySuccessResponse(t, resp2)
-	verifyStatsFresh(t, initialStats)
+	resp, err := fakeDriver.Create("foo.rrd", 1438354678, 10, true, testDefineDS, testDefineRRA)
 
-	os.Remove(RRD_FILE_FULL)
-	resp3, _ := driver.Create(RRD_FILE, now, 10, true, defineDS, defineRRA)
-	verifySuccessResponse(t, resp3)
-	verifyStatsFresh(t, initialStats)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
+
+func TestCreateWithStart(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"CREATE foo.rrd -b 1438354678 -O DS:test1:GAUGE:600:0:100 DS:test2:GAUGE:600:0:100 RRA:MIN:0.5:12:1440 RRA:MAX:0.5:12:1440 RRA:AVERAGE:0.5:1:1440\n",
+		"0 RRD created successfully (/tmp/foo.rrd)",
+	)
+
+	resp, err := fakeDriver.Create("foo.rrd", 1438354678, -1, false, testDefineDS, testDefineRRA)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
+
+func TestCreateWithStep(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"CREATE foo.rrd -s 10 -O DS:test1:GAUGE:600:0:100 DS:test2:GAUGE:600:0:100 RRA:MIN:0.5:12:1440 RRA:MAX:0.5:12:1440 RRA:AVERAGE:0.5:1:1440\n",
+		"0 RRD created successfully (/tmp/foo.rrd)",
+	)
+
+	resp, err := fakeDriver.Create("foo.rrd", -1, 10, false, testDefineDS, testDefineRRA)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
+
+func TestCreateWithOverwrite(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"CREATE foo.rrd DS:test1:GAUGE:600:0:100 DS:test2:GAUGE:600:0:100 RRA:MIN:0.5:12:1440 RRA:MAX:0.5:12:1440 RRA:AVERAGE:0.5:1:1440\n",
+		"0 RRD created successfully (/tmp/foo.rrd)",
+	)
+
+	resp, err := fakeDriver.Create("foo.rrd", -1, -1, true, testDefineDS, testDefineRRA)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
+
+func TestCreateWithUnsupportedFlag(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"CREATE foo.rrd -O DS:test1:GAUGE:600:0:100 DS:test2:GAUGE:600:0:100 RRA:MIN:0.5:12:1440 RRA:MAX:0.5:12:1440 RRA:AVERAGE:0.5:1:1440\n",
+		"-1 Error while creating rrd (can't parse argument '-O')",
+	)
+
+	resp, err := fakeDriver.Create("foo.rrd", -1, -1, false, testDefineDS, testDefineRRA)
+
+	assert.IsType(t, &UnrecognizedArgumentError{}, err)
+	assert.Equal(t, -1, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
 }
 
 func TestUpdate(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
+	expected, fakeDriver := prepTestData(
+		"UPDATE foo.rrd 1438354679:10:20:30:40 1438354680:90:80:70:60\n",
+		"0 errors, enqueued 4 value(s).",
+	)
 
-	update_values1 := generateTimestamps(rrdUpdates)
-	resp1, _ := driver.Update(RRD_FILE, update_values1...)
-	verifyUpdateResponseForN(t, resp1, update_values1)
+	resp, err := fakeDriver.Update("foo.rrd", "1438354679:10:20:30:40", "1438354680:90:80:70:60")
 
-	update_values2 := generateTimestamps(rrdUpdates)
-	resp2, _ := driver.Update(RRD_FILE, update_values2...)
-	verifyUpdateResponseForN(t, resp2, update_values2)
-
-	verifyStatsFresh(t, map[string]uint64{
-		"UpdatesReceived": 2,
-	})
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
 }
 
 func TestUpdateWithoutExistingRRD(t *testing.T) {
-	testSetup(t)
-	os.Remove(RRD_FILE_FULL) // Remove existing RRD file
-	defer testTeardown()
+	expected, fakeDriver := prepTestData(
+		"UPDATE foo.rrd 1438354679:10:20:30:40 1438354680:90:80:70:60\n",
+		"-1 No such file: /tmp/foo.rrd",
+	)
 
-	update_values1 := generateTimestamps(rrdUpdates)
-	_, err := driver.Update(RRD_FILE, update_values1...)
-	if err == nil {
-		t.Error("Error expected from Update of a non-existing RRD file, but no error received.")
-	}
-	if _, ok := err.(*FileDoesNotExistError); !ok {
-		t.Errorf("FileDoesNotExistError expected from Update of a non-existing RRD file, but %T received.", err)
-	}
+	resp, err := fakeDriver.Update("foo.rrd", "1438354679:10:20:30:40", "1438354680:90:80:70:60")
+
+	assert.IsType(t, &FileDoesNotExistError{}, err)
+	assert.Equal(t, -1, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
 }
 
 func TestPending(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
+	expected, fakeDriver := prepTestData(
+		"PENDING foo.rrd\n",
+		"4 updates pending",
+	)
 
-	update_values := generateTimestamps(rrdUpdates)
+	resp, err := fakeDriver.Pending("foo.rrd")
 
-	resp, _ := driver.Update(RRD_FILE, update_values...)
-	verifyUpdateResponseForN(t, resp, update_values)
-
-	resp, _ = driver.Pending(RRD_FILE)
-	verifyPendingResponseForN(t, resp, update_values)
-
-	verifyStatsFresh(t, map[string]uint64{
-		"UpdatesReceived": 1,
-		"UpdatesWritten":  0,
-		"DataSetsWritten": 0,
-	})
-}
-
-func TestFlush(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
-
-	update_values := generateTimestamps(rrdUpdates)
-
-	resp, _ := driver.Update(RRD_FILE, update_values...)
-	verifyUpdateResponseForN(t, resp, update_values)
-
-	resp, _ = driver.Flush(RRD_FILE)
-	verifySuccessResponse(t, resp)
-
-	verifyStatsFresh(t, map[string]uint64{
-		"FlushesReceived": 1,
-		"UpdatesReceived": 1,
-	})
-}
-
-func TestFlushAll(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
-
-	update_values := generateTimestamps(rrdUpdates)
-
-	resp, _ := driver.Update(RRD_FILE, update_values...)
-	verifyUpdateResponseForN(t, resp, update_values)
-
-	resp, _ = driver.FlushAll()
-	verifySuccessResponse(t, resp)
-
-	verifyStatsFresh(t, map[string]uint64{
-		"FlushesReceived": 0,
-		"UpdatesReceived": 1,
-	})
+	assert.NoError(t, err)
+	assert.Equal(t, 4, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
 }
 
 func TestForget(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
+	expected, fakeDriver := prepTestData(
+		"FORGET foo.rrd\n",
+		"0 Gone!",
+	)
 
-	update_values := generateTimestamps(rrdUpdates)
+	resp, err := fakeDriver.Forget("foo.rrd")
 
-	resp, _ := driver.Update(RRD_FILE, update_values...)
-	verifyUpdateResponseForN(t, resp, update_values)
-
-	resp, _ = driver.Forget(RRD_FILE)
-	verifySuccessResponse(t, resp)
-
-	verifyStatsFresh(t, map[string]uint64{
-		"FlushesReceived": 0,
-		"UpdatesReceived": 1,
-		"UpdatesWritten":  0,
-		"DataSetsWritten": 0,
-	})
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
 }
 
-func TestFirst(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
+func TestFlush(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"FLUSH foo.rrd\n",
+		"0 Successfully flushed /tmp/foo.rrd.",
+	)
 
-	// Note: The FIRST command is only recently supported.
-	// Tests included for completeness, but lack of support shouldn't cause test failure.
-	// TODO: Convert these to system tests, update unit tests to be system agnostic.
-	resp1, cmderr := driver.First(RRD_FILE, 0)
-	if cmderr != nil {
-		if _, ok := cmderr.(*UnknownCommandError); ok {
-			fmt.Println("Warning: FIRST is unsupported on this system.")
-			return
-		}
-	}
-	verifySuccessResponse(t, resp1)
+	resp, err := fakeDriver.Flush("foo.rrd")
 
-	timestamp1, err1 := strconv.ParseUint(resp1.Message, 10, 64)
-	if err1 != nil {
-		t.Errorf("FIRST timestamp %v is not parseable: %v", resp1.Message, err1)
-	}
-
-	resp2, _ := driver.First(RRD_FILE, 1)
-	verifySuccessResponse(t, resp2)
-
-	timestamp2, err2 := strconv.ParseUint(resp2.Message, 10, 64)
-	if err2 != nil {
-		t.Errorf("FIRST timestamp %v is not parseable: %v", resp2.Message, err2)
-	}
-
-	if timestamp1 != timestamp2 {
-		t.Errorf("FIRST timestamps are not consistent: %d != %d", timestamp1, timestamp2)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
 }
 
-func TestLast(t *testing.T) {
-	testSetup(t)
-	defer testTeardown()
+func TestFlushAll(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"FLUSHALL\n",
+		"0 Started flush.",
+	)
 
-	// Note: The LAST command is only recently supported.
-	// Tests included for completeness, but lack of support shouldn't cause test failure.
-	// TODO: Convert these to system tests, update unit tests to be system agnostic.
-	resp, cmderr := driver.Last(RRD_FILE)
-	if cmderr != nil {
-		if _, ok := cmderr.(*UnknownCommandError); ok {
-			fmt.Println("Warning: LAST is unsupported on this system.")
-			return
-		}
-	}
-	verifySuccessResponse(t, resp)
+	resp, err := fakeDriver.FlushAll()
 
-	_, err := strconv.ParseUint(resp.Message, 10, 64)
-	if err != nil {
-		t.Errorf("LAST timestamp %v is not parseable: %v", resp.Message, err)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, 0, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
+
+func TestFirstUnsupported(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"FIRST foo.rrd 1\n",
+		"-1 Unknown command: FIRST",
+	)
+
+	resp, err := fakeDriver.First("foo.rrd", 1)
+
+	assert.IsType(t, &UnknownCommandError{}, err)
+	assert.Equal(t, -1, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
+
+func TestLastUnsupported(t *testing.T) {
+	expected, fakeDriver := prepTestData(
+		"LAST foo.rrd\n",
+		"-1 Unknown command: LAST",
+	)
+
+	resp, err := fakeDriver.Last("foo.rrd")
+
+	assert.IsType(t, &UnknownCommandError{}, err)
+	assert.Equal(t, -1, resp.Status)
+	assert.Equal(t, expected, fakeDriver.Rrdio)
+}
+
+func TestStats(t *testing.T) {
+	_, fakeDriver := prepTestData(
+		"STATS\n",
+		"10 Statistics follow\nQueueLength: 2\nCreatesReceived: 3\nUpdatesReceived: 5\nFlushesReceived: 7\nUpdatesWritten: 11\nDataSetsWritten: 13\nTreeNodesNumber: 17\nTreeDepth: 19\nJournalBytes: 23\nJournalRotate: 29",
+	)
+
+	stats := fakeDriver.GetStats()
+
+	assert.Equal(t, 2, stats.QueueLength)
+	assert.Equal(t, 3, stats.CreatesReceived)
+	assert.Equal(t, 5, stats.UpdatesReceived)
+	assert.Equal(t, 7, stats.FlushesReceived)
+	assert.Equal(t, 11, stats.UpdatesWritten)
+	assert.Equal(t, 13, stats.DataSetsWritten)
+	assert.Equal(t, 17, stats.TreeNodesNumber)
+	assert.Equal(t, 19, stats.TreeDepth)
+	assert.Equal(t, 23, stats.JournalBytes)
+	assert.Equal(t, 29, stats.JournalRotate)
 }

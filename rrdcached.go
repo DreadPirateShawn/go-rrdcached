@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/golang/glog"
 )
 
 type Rrdcached struct {
@@ -18,12 +20,14 @@ type Rrdcached struct {
 	Ip       string
 	Port     int64
 	Conn     net.Conn
+	Rrdio    RRDIO
 }
 
 func ConnectToSocket(socket string) *Rrdcached {
 	driver := &Rrdcached{
 		Protocol: "unix",
 		Socket:   socket,
+		Rrdio:    &dataTransport{},
 	}
 	driver.connect()
 	return driver
@@ -34,6 +38,7 @@ func ConnectToIP(ip string, port int64) *Rrdcached {
 		Protocol: "tcp",
 		Ip:       ip,
 		Port:     port,
+		Rrdio:    &dataTransport{},
 	}
 	driver.connect()
 	return driver
@@ -59,6 +64,7 @@ func (r *Rrdcached) connect() {
 
 type Stats struct {
 	QueueLength     uint64
+	CreatesReceived uint64
 	UpdatesReceived uint64
 	FlushesReceived uint64
 	UpdatesWritten  uint64
@@ -141,7 +147,14 @@ func parseStats(data string) *Stats {
 // http://stackoverflow.com/questions/2886719/unix-sockets-in-go
 // -------------------------------------------------------------
 
-func readData(r io.Reader) string {
+type RRDIO interface {
+	ReadData(r io.Reader) string
+	WriteData(conn net.Conn, data string)
+}
+
+type dataTransport struct{}
+
+func (rrdio dataTransport) ReadData(r io.Reader) string {
 	data := ""
 
 	for {
@@ -178,13 +191,21 @@ func readData(r io.Reader) string {
 	return data
 }
 
-func writeData(conn net.Conn, data string) {
-	fmt.Printf("========== %v", data)
+func (rrdio dataTransport) WriteData(conn net.Conn, data string) {
+	glog.V(2).Infof("========== %v", data)
 
 	_, err := conn.Write([]byte(data))
 	if err != nil {
 		panic(err)
 	}
+}
+
+func (r *Rrdcached) read() string {
+	return r.Rrdio.ReadData(r.Conn)
+}
+
+func (r *Rrdcached) write(data string) {
+	r.Rrdio.WriteData(r.Conn, data)
 }
 
 type Response struct {
@@ -193,10 +214,10 @@ type Response struct {
 	Raw     string
 }
 
-func checkResponse(conn net.Conn) (*Response, error) {
-	data := readData(conn)
+func (r *Rrdcached) checkResponse() (*Response, error) {
+	data := r.read()
 	data = strings.TrimSpace(data)
-	fmt.Println(data)
+	glog.V(5).Infof(data)
 
 	lines := strings.SplitN(data, " ", 2)
 
@@ -233,8 +254,8 @@ func NowString() string {
 // ----------------------------------------------------------
 
 func (r *Rrdcached) GetStats() *Stats {
-	writeData(r.Conn, "STATS\n")
-	data := readData(r.Conn)
+	r.write("STATS\n")
+	data := r.read()
 	return parseStats(data)
 }
 
@@ -256,45 +277,45 @@ func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite b
 		params = append(params, strings.Join(rra, " "))
 	}
 
-	writeData(r.Conn, "CREATE "+filename+" "+strings.Join(params, " ")+"\n")
-	return checkResponse(r.Conn)
+	r.write("CREATE " + filename + " " + strings.Join(params, " ") + "\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) Update(filename string, values ...string) (*Response, error) {
-	writeData(r.Conn, "UPDATE "+filename+" "+strings.Join(values, " ")+"\n")
-	return checkResponse(r.Conn)
+	r.write("UPDATE " + filename + " " + strings.Join(values, " ") + "\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) Pending(filename string) (*Response, error) {
-	writeData(r.Conn, "PENDING "+filename+"\n")
-	return checkResponse(r.Conn)
+	r.write("PENDING " + filename + "\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) Forget(filename string) (*Response, error) {
-	writeData(r.Conn, "FORGET "+filename+"\n")
-	return checkResponse(r.Conn)
+	r.write("FORGET " + filename + "\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) Flush(filename string) (*Response, error) {
-	writeData(r.Conn, "FLUSH "+filename+"\n")
-	return checkResponse(r.Conn)
+	r.write("FLUSH " + filename + "\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) FlushAll() (*Response, error) {
-	writeData(r.Conn, "FLUSHALL\n")
-	return checkResponse(r.Conn)
+	r.write("FLUSHALL\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) First(filename string, rraIndex int) (*Response, error) {
-	writeData(r.Conn, "FIRST "+filename+" "+string(rraIndex)+"\n")
-	return checkResponse(r.Conn)
+	r.write("FIRST " + filename + " " + strconv.Itoa(rraIndex) + "\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) Last(filename string) (*Response, error) {
-	writeData(r.Conn, "LAST "+filename+"\n")
-	return checkResponse(r.Conn)
+	r.write("LAST " + filename + "\n")
+	return r.checkResponse()
 }
 
 func (r *Rrdcached) Quit() {
-	writeData(r.Conn, "QUIT\n")
+	r.write("QUIT\n")
 }
