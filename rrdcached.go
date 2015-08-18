@@ -192,7 +192,7 @@ func (rrdio dataTransport) ReadData(r io.Reader) string {
 }
 
 func (rrdio dataTransport) WriteData(conn net.Conn, data string) {
-	glog.V(2).Infof("========== %v", data)
+	glog.V(10).Infof("========== %v", data)
 
 	_, err := conn.Write([]byte(data))
 	if err != nil {
@@ -217,7 +217,7 @@ type Response struct {
 func (r *Rrdcached) checkResponse() (*Response, error) {
 	data := r.read()
 	data = strings.TrimSpace(data)
-	glog.V(5).Infof(data)
+	glog.V(10).Infof(data)
 
 	lines := strings.SplitN(data, " ", 2)
 
