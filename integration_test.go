@@ -39,6 +39,7 @@ var (
 	driver_port int64
 	driver      *Rrdcached
 	daemon      *tcptest.TCPTest
+	connErr     error
 )
 
 // ------------------------------------------
@@ -110,7 +111,7 @@ func daemonStop() {
 }
 
 func daemonConnect() {
-	driver = ConnectToSocket(testSocket)
+	driver, connErr = ConnectToSocket(testSocket)
 }
 
 func createFreshRRD(t *testing.T) {
@@ -141,6 +142,12 @@ func generateTimestamps(values []string) []string {
 
 // ------------------------------------------
 // Helper Validations
+
+func verifyNoError(t *testing.T, err error) {
+	if err != nil {
+		t.Errorf("Error encountered: \"%v\"", err)
+	}
+}
 
 func verifySuccessResponse(t *testing.T, resp *Response) {
 	if resp.Status != 0 {
@@ -180,7 +187,7 @@ func verifyPendingResponseForN(t *testing.T, resp *Response, update_values []str
 }
 
 func verifyStatsFresh(t *testing.T, stats_diff map[string]uint64) {
-	stats := driver.GetStats()
+	stats, _ := driver.GetStats()
 	log(5, ">> STATS << %+v", stats)
 	verifyStatsDiff(t, &Stats{}, stats, stats_diff)
 }
@@ -215,10 +222,12 @@ func TestIntegrationConnect(t *testing.T) {
 	testSetup(t)
 	defer testTeardown()
 
-	test_driver1 := ConnectToSocket(testSocket)
+	test_driver1, connErr1 := ConnectToSocket(testSocket)
+	verifyNoError(t, connErr1)
 	test_driver1.Quit()
 
-	test_driver2 := ConnectToIP("localhost", driver_port)
+	test_driver2, connErr2 := ConnectToIP("localhost", driver_port)
+	verifyNoError(t, connErr2)
 	test_driver2.Quit()
 }
 

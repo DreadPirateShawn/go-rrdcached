@@ -12,20 +12,22 @@ import (
 type fakeDataTransport struct {
 	written  string
 	response string
+	error    error
 }
 
-func (rrdio *fakeDataTransport) WriteData(conn net.Conn, data string) {
+func (rrdio *fakeDataTransport) WriteData(conn net.Conn, data string) error {
 	fmt.Print("===== WriteData =====\n")
 	fmt.Printf("%+v\n", rrdio)
 	rrdio.written = data
+	return rrdio.error
 }
 
-func (rrdio *fakeDataTransport) ReadData(r io.Reader) string {
-	return rrdio.response
+func (rrdio *fakeDataTransport) ReadData(r io.Reader) (string, error) {
+	return rrdio.response, rrdio.error
 }
 
 func prepTestData(fakeWritten string, fakeResponse string) (expected *fakeDataTransport, fakeDriver *Rrdcached) {
-	expected = &fakeDataTransport{fakeWritten, fakeResponse}
+	expected = &fakeDataTransport{fakeWritten, fakeResponse, nil}
 	fakeDriver = &Rrdcached{Rrdio: &fakeDataTransport{response: fakeResponse}}
 	return expected, fakeDriver
 }
@@ -37,6 +39,20 @@ var (
 	testDefineDS  = []string{"DS:test1:GAUGE:600:0:100", "DS:test2:GAUGE:600:0:100"}
 	testDefineRRA = []string{"RRA:MIN:0.5:12:1440", "RRA:MAX:0.5:12:1440", "RRA:AVERAGE:0.5:1:1440"}
 )
+
+func TestConnectIP(t *testing.T) {
+	driver, err := ConnectToIP("foo", 1)
+	assert.NotNil(t, driver)
+	assert.IsType(t, &net.OpError{}, err)
+	assert.IsType(t, &ConnectionError{}, checkError(err))
+}
+
+func TestConnectSocket(t *testing.T) {
+	driver, err := ConnectToSocket("foo.sock")
+	assert.NotNil(t, driver)
+	assert.IsType(t, &net.OpError{}, err)
+	assert.IsType(t, &ConnectionError{}, checkError(err))
+}
 
 func TestCreate(t *testing.T) {
 	expected, fakeDriver := prepTestData(
@@ -226,7 +242,7 @@ func TestStats(t *testing.T) {
 		"10 Statistics follow\nQueueLength: 2\nCreatesReceived: 3\nUpdatesReceived: 5\nFlushesReceived: 7\nUpdatesWritten: 11\nDataSetsWritten: 13\nTreeNodesNumber: 17\nTreeDepth: 19\nJournalBytes: 23\nJournalRotate: 29",
 	)
 
-	stats := fakeDriver.GetStats()
+	stats, _ := fakeDriver.GetStats()
 
 	assert.Equal(t, 2, stats.QueueLength)
 	assert.Equal(t, 3, stats.CreatesReceived)

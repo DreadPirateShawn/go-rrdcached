@@ -16,9 +16,22 @@ RRDTool / RRDCacheD can be found here: https://github.com/oetiker/rrdtool-1.x
 
 ## Basic RRDCacheD test
 
+### Unit tests
+
+```
+go test -v ./...
+```
+
+The go-rrdcached test suite starts and stops rrdcached daemon instances of its own, so you don't need to leave rrdcached running during development.
+
+### Integration tests
+
 ```
 rrdcached -p /tmp/go-rrdached-test.pid -B -b /tmp -l /tmp/go-rrdcached-test.sock -l 0.0.0.0:50081
+go test -v ./... -tags=integration
 ```
+
+### Manual validation
 
 Verify socket connection using `nc`:
 
@@ -44,8 +57,6 @@ Verify TCP connection using `telnet`:
     Connection closed.
 
 Btw: [Telnet doesn't work for unix:socket.](https://github.com/tj/go-debug/issues/2)
-
-The go-rrdcached test suite starts and stops rrdcached daemon instances of its own, so you don't need to leave rrdcached running during development.
 
 ## Troubleshooting
 

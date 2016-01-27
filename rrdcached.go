@@ -23,17 +23,17 @@ type Rrdcached struct {
 	Rrdio    RRDIO
 }
 
-func ConnectToSocket(socket string) *Rrdcached {
+func ConnectToSocket(socket string) (*Rrdcached, error) {
 	driver := &Rrdcached{
 		Protocol: "unix",
 		Socket:   socket,
 		Rrdio:    &dataTransport{},
 	}
-	driver.connect()
-	return driver
+	err := driver.connect()
+	return driver, err
 }
 
-func ConnectToIP(ip string, port int64) *Rrdcached {
+func ConnectToIP(ip string, port int64) (*Rrdcached, error) {
 	driver := &Rrdcached{
 		Protocol: "tcp",
 		Ip:       ip,
@@ -41,10 +41,11 @@ func ConnectToIP(ip string, port int64) *Rrdcached {
 		Rrdio:    &dataTransport{},
 	}
 	driver.connect()
-	return driver
+	err := driver.connect()
+	return driver, err
 }
 
-func (r *Rrdcached) connect() {
+func (r *Rrdcached) connect() error {
 	var target string
 
 	if r.Protocol == "unix" {
@@ -56,10 +57,8 @@ func (r *Rrdcached) connect() {
 	}
 
 	conn, err := net.Dial(r.Protocol, target)
-	if err != nil {
-		panic(err)
-	}
 	r.Conn = conn
+	return err
 }
 
 type Stats struct {
@@ -76,6 +75,22 @@ type Stats struct {
 }
 
 // ----------------------------------------------------------
+
+type PanicError struct {
+	Err error
+}
+
+func (f *PanicError) Error() string {
+	return f.Err.Error()
+}
+
+type ConnectionError struct {
+	Err error
+}
+
+func (f *ConnectionError) Error() string {
+	return f.Err.Error()
+}
 
 type UnknownCommandError struct {
 	Err error
@@ -109,6 +124,19 @@ func (f *UnrecognizedArgumentError) BadArgument() string {
 	} else {
 		return ""
 	}
+}
+
+func checkError(err error) error {
+	if err != nil {
+		switch {
+		case strings.HasPrefix(err.Error(), "dial tcp:"), strings.HasPrefix(err.Error(), "dial unix "):
+			return &ConnectionError{err}
+		case strings.Contains(err.Error(), " broken pipe"):
+			return &ConnectionError{err}
+		}
+		return &PanicError{err}
+	}
+	return nil
 }
 
 // ---------------------------------------------
@@ -148,20 +176,24 @@ func parseStats(data string) *Stats {
 // -------------------------------------------------------------
 
 type RRDIO interface {
-	ReadData(r io.Reader) string
-	WriteData(conn net.Conn, data string)
+	ReadData(r io.Reader) (string, error)
+	WriteData(conn net.Conn, data string) error
 }
 
 type dataTransport struct{}
 
-func (rrdio dataTransport) ReadData(r io.Reader) string {
+func (rrdio dataTransport) ReadData(r io.Reader) (string, error) {
 	data := ""
+
+	if r == nil {
+		return "", &ConnectionError{fmt.Errorf("RRDCacheD is not connected, cannot read data.")}
+	}
 
 	for {
 		buf := make([]byte, 1024)
 		n, err := r.Read(buf[:])
 		if err != nil {
-			panic(err)
+			return "", checkError(err)
 		}
 		data += string(buf[0:n])
 
@@ -188,24 +220,26 @@ func (rrdio dataTransport) ReadData(r io.Reader) string {
 		}
 	}
 
-	return data
+	return data, nil
 }
 
-func (rrdio dataTransport) WriteData(conn net.Conn, data string) {
+func (rrdio dataTransport) WriteData(conn net.Conn, data string) error {
 	glog.V(10).Infof("========== %v", data)
 
-	_, err := conn.Write([]byte(data))
-	if err != nil {
-		panic(err)
+	if conn == nil {
+		return &ConnectionError{fmt.Errorf("RRDCacheD is not connected, cannot write data.")}
 	}
+
+	_, err := conn.Write([]byte(data))
+	return checkError(err)
 }
 
-func (r *Rrdcached) read() string {
+func (r *Rrdcached) read() (string, error) {
 	return r.Rrdio.ReadData(r.Conn)
 }
 
-func (r *Rrdcached) write(data string) {
-	r.Rrdio.WriteData(r.Conn, data)
+func (r *Rrdcached) write(data string) error {
+	return r.Rrdio.WriteData(r.Conn, data)
 }
 
 type Response struct {
@@ -215,7 +249,11 @@ type Response struct {
 }
 
 func (r *Rrdcached) checkResponse() (*Response, error) {
-	data := r.read()
+	data, err := r.read()
+	if err != nil {
+		return nil, err
+	}
+
 	data = strings.TrimSpace(data)
 	glog.V(10).Infof(data)
 
@@ -223,7 +261,6 @@ func (r *Rrdcached) checkResponse() (*Response, error) {
 
 	status, _ := strconv.ParseInt(lines[0], 10, 0)
 
-	var err error
 	if int(status) == -1 {
 		err = errors.New(lines[1])
 		switch {
@@ -253,10 +290,14 @@ func NowString() string {
 
 // ----------------------------------------------------------
 
-func (r *Rrdcached) GetStats() *Stats {
-	r.write("STATS\n")
-	data := r.read()
-	return parseStats(data)
+func (r *Rrdcached) GetStats() (*Stats, error) {
+	writeErr := r.write("STATS\n")
+	if writeErr != nil {
+		return nil, writeErr
+	}
+
+	data, readErr := r.read()
+	return parseStats(data), readErr
 }
 
 func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite bool, ds []string, rra []string) (*Response, error) {
@@ -277,42 +318,66 @@ func (r *Rrdcached) Create(filename string, start int64, step int64, overwrite b
 		params = append(params, strings.Join(rra, " "))
 	}
 
-	r.write("CREATE " + filename + " " + strings.Join(params, " ") + "\n")
+	err := r.write("CREATE " + filename + " " + strings.Join(params, " ") + "\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
 func (r *Rrdcached) Update(filename string, values ...string) (*Response, error) {
-	r.write("UPDATE " + filename + " " + strings.Join(values, " ") + "\n")
+	err := r.write("UPDATE " + filename + " " + strings.Join(values, " ") + "\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
 func (r *Rrdcached) Pending(filename string) (*Response, error) {
-	r.write("PENDING " + filename + "\n")
+	err := r.write("PENDING " + filename + "\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
 func (r *Rrdcached) Forget(filename string) (*Response, error) {
-	r.write("FORGET " + filename + "\n")
+	err := r.write("FORGET " + filename + "\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
 func (r *Rrdcached) Flush(filename string) (*Response, error) {
-	r.write("FLUSH " + filename + "\n")
+	err := r.write("FLUSH " + filename + "\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
 func (r *Rrdcached) FlushAll() (*Response, error) {
-	r.write("FLUSHALL\n")
+	err := r.write("FLUSHALL\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
 func (r *Rrdcached) First(filename string, rraIndex int) (*Response, error) {
-	r.write("FIRST " + filename + " " + strconv.Itoa(rraIndex) + "\n")
+	err := r.write("FIRST " + filename + " " + strconv.Itoa(rraIndex) + "\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
 func (r *Rrdcached) Last(filename string) (*Response, error) {
-	r.write("LAST " + filename + "\n")
+	err := r.write("LAST " + filename + "\n")
+	if err != nil {
+		return nil, err
+	}
 	return r.checkResponse()
 }
 
